@@ -64,8 +64,8 @@ fi
 log "Dumping items for cache $CACHE_ID..."
 java -Xmx2g -jar "$JAR" \
   --cachedir "$CACHE_DIR" \
-  --output-extended "$OUTPUT_DIR/extended_items.json" \
-  --output-simple "$OUTPUT_DIR/simple_items.json" \
+  --out-extended "$OUTPUT_DIR/extended_items.json" \
+  --out-simple "$OUTPUT_DIR/simple_items.json" \
   "${stats_arg[@]}"
 
 log "Done. Updated:"

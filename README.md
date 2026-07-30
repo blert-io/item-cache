@@ -79,8 +79,8 @@ cd java
 ./gradlew shadowJar
 java -jar build/libs/item-cache-dumper-1.0-all.jar \
   --cachedir /path/to/unpacked/cache \
-  --output-extended extended_items.json \
-  --output-simple simple_items.json
+  --out-extended extended_items.json \
+  --out-simple simple_items.json
 ```
 
 ## Fidelity notes

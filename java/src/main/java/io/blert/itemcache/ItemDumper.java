@@ -103,16 +103,15 @@ public class ItemDumper {
 
         log.info("Dumped {} items", items.size());
 
-        // Extended output uses the default GSON configuration.
-        writeJson(extendedOut, new Gson(), items);
+        // Print one item per line for readable diffs. Escaping off for literal names.
+        Gson gson = new GsonBuilder().disableHtmlEscaping().create();
+        writeItemsPerLine(extendedOut, gson, items);
 
-        // The simple file historically came from a separate, manual step that
-	// did not HTML escape, so apostrophes are emitted literally.
         List<SimpleItem> simple = new ArrayList<>(items.size());
         for (Item item : items) {
             simple.add(new SimpleItem(item.id, item.name));
         }
-        writeJson(simpleOut, new GsonBuilder().disableHtmlEscaping().create(), simple);
+        writeItemsPerLine(simpleOut, gson, simple);
 
         log.info("Wrote {} and {}", extendedOut, simpleOut);
     }
@@ -215,13 +214,23 @@ public class ItemDumper {
         }
     }
 
-    private static void writeJson(Path out, Gson gson, Object value) throws IOException {
+    private static void writeItemsPerLine(Path out, Gson gson, List<?> items) throws IOException {
         File parent = out.toAbsolutePath().getParent().toFile();
         if (!parent.exists() && !parent.mkdirs()) {
             throw new IOException("Failed to create output directory " + parent);
         }
         try (BufferedWriter writer = Files.newBufferedWriter(out, StandardCharsets.UTF_8)) {
-            gson.toJson(value, writer);
+            if (items.isEmpty()) {
+                writer.write("[]\n");
+                return;
+            }
+            writer.write("[\n");
+            for (int i = 0; i < items.size(); i++) {
+                writer.write("  ");
+                writer.write(gson.toJson(items.get(i)));
+                writer.write(i < items.size() - 1 ? ",\n" : "\n");
+            }
+            writer.write("]\n");
         }
     }
 

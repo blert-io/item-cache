@@ -1,0 +1,9 @@
+# Gradle
+java/.gradle/
+java/build/
+
+# Local run artifacts
+work/
+cache/
+resources/
+*.log

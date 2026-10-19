@@ -3,7 +3,8 @@
 #
 # Only sprites whose pixels differ from the bucket's copy of manifest.json are
 # uploaded. The manifest is replaced last, so an interrupted upload is retried
-# by the next run. Sprites are never deleted.
+# by the next run. Sprites are never deleted. On success, writes the uploaded
+# sprites to <sprites dir>/uploaded.txt as "new <file>" or "changed <file>".
 #
 # Usage: upload-sprites.sh <sprites dir>
 set -euo pipefail
@@ -22,6 +23,7 @@ fi
 log() { echo "[item-cache] $*"; }
 s5() { s5cmd --numworkers "${SPRITES_NUMWORKERS:-32}" "$@"; }
 
+rm -f "$SPRITES_DIR/uploaded.txt"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -47,6 +49,7 @@ changed=$(grep -c '^changed ' "$tmp/diff" || true)
 log "$new new and $changed changed sprites."
 
 if [[ ! -s "$tmp/diff" ]]; then
+  : > "$SPRITES_DIR/uploaded.txt"
   exit 0
 fi
 
@@ -86,3 +89,5 @@ fi
 s5 cp --content-type application/json --cache-control no-cache \
   "$SPRITES_DIR/manifest.json" "${DEST}manifest.json" >/dev/null
 log "Updated ${DEST}manifest.json."
+
+cp "$tmp/diff" "$SPRITES_DIR/uploaded.txt"

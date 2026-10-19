@@ -137,6 +137,10 @@ uploads only new and changed sprites as public `image/png` objects, optionally
 purges changed ones from a CDN, and replaces the bucket's manifest. Sprites
 are never deleted from the bucket.
 
+After a successful upload, `SPRITES_DIR/uploaded.txt` lists every uploaded
+sprite, one `new <file>` or `changed <file>` line each. It is empty if nothing
+changed.
+
 `SPRITES_MAX_CHANGED` can be set as an optional sanity check, causing the upload
 to fail if more than the configured number of sprites change. `SPRITES_FORCE=1`
 bypasses this, for example following a manual inspection.

@@ -5,5 +5,5 @@ java/build/
 # Local run artifacts
 work/
 cache/
-resources/
+/resources/
 *.log

@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.annotations.SerializedName;
 import com.google.gson.reflect.TypeToken;
+import java.awt.image.BufferedImage;
 import java.io.BufferedWriter;
 import java.io.File;
 import java.io.IOException;
@@ -11,15 +12,33 @@ import java.io.InputStreamReader;
 import java.io.Reader;
 import java.lang.reflect.Type;
 import java.net.URL;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeSet;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import javax.imageio.ImageIO;
+import net.runelite.cache.IndexType;
 import net.runelite.cache.ItemManager;
+import net.runelite.cache.SpriteManager;
+import net.runelite.cache.TextureManager;
 import net.runelite.cache.definitions.ItemDefinition;
+import net.runelite.cache.definitions.loaders.ModelLoader;
+import net.runelite.cache.definitions.providers.ModelProvider;
+import net.runelite.cache.fs.Archive;
+import net.runelite.cache.fs.Index;
 import net.runelite.cache.fs.Store;
+import net.runelite.cache.item.ItemSpriteFactory;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.DefaultParser;
 import org.apache.commons.cli.Option;
@@ -69,6 +88,10 @@ public class ItemDumper {
                 .desc("Path to write the simple {id,name} items JSON").build());
         options.addOption(Option.builder().longOpt("stats-url").hasArg()
                 .desc("URL of the RuneLite item stats service").build());
+        options.addOption(Option.builder().longOpt("out-sprites").hasArg()
+                .desc("Directory to write item sprite PNGs and their manifest").build());
+        options.addOption(Option.builder().longOpt("out-item-sprites").hasArg()
+                .desc("Path to write the item sprite metadata JSON (requires --out-sprites)").build());
 
         CommandLine cmd;
         try {
@@ -83,6 +106,14 @@ public class ItemDumper {
         final Path extendedOut = Path.of(cmd.getOptionValue("out-extended"));
         final Path simpleOut = Path.of(cmd.getOptionValue("out-simple"));
         final String statsUrl = cmd.getOptionValue("stats-url", DEFAULT_STATS_URL);
+        final Path spritesOut = cmd.hasOption("out-sprites") ? Path.of(cmd.getOptionValue("out-sprites")) : null;
+        final Path itemSpritesOut =
+                cmd.hasOption("out-item-sprites") ? Path.of(cmd.getOptionValue("out-item-sprites")) : null;
+        if (itemSpritesOut != null && spritesOut == null) {
+            System.err.println("--out-item-sprites requires --out-sprites");
+            System.exit(2);
+            return;
+        }
 
         log.info("Loading item stats from {}", statsUrl);
         Map<Integer, ServiceStats> statsById = loadStats(statsUrl);
@@ -99,6 +130,10 @@ public class ItemDumper {
             itemManager.link();
 
             items = buildItems(itemManager, statsById);
+
+            if (spritesOut != null) {
+                renderSprites(store, itemManager, items, spritesOut, itemSpritesOut);
+            }
         }
 
         log.info("Dumped {} items", items.size());
@@ -192,9 +227,6 @@ public class ItemDumper {
      *   <li>Noted items inherit the flag from their unnoted base item.
      *   <li>"bought" placeholder items are never tradeable.
      * </ul>
-     *
-     * This rule was validated to reproduce the flag for all 21,476 dumped items
-     * on cache build 238.
      */
     private static boolean isTradeable(ItemManager itemManager, ItemDefinition def) {
         if (def.notedTemplate != -1) {
@@ -205,6 +237,143 @@ public class ItemDumper {
             return false;
         }
         return def.tradeable;
+    }
+
+    private static int[] stackThresholds(ItemDefinition def) {
+        if (def.countCo == null) {
+            return null;
+        }
+        TreeSet<Integer> thresholds = new TreeSet<>();
+        for (int count : def.countCo) {
+            if (count > 1) {
+                thresholds.add(count);
+            }
+        }
+        return thresholds.isEmpty() ? null : thresholds.stream().mapToInt(Integer::intValue).toArray();
+    }
+
+    /**
+     * Renders each item's sprite to {@code <id>.png}, and its sprite at each
+     * stack threshold to {@code <id>_<threshold>.png}.
+     * Writes a manifest mapping each file to a SHA-256 hash of its pixels.
+     * If {@code itemSpritesOut} is set, outputs metadata about each item's
+     * sprites.
+     */
+    private static void renderSprites(Store store, ItemManager itemManager, List<Item> items, Path outDir,
+            Path itemSpritesOut) throws IOException {
+        Files.createDirectories(outDir);
+
+        SpriteManager spriteManager = new SpriteManager(store);
+        spriteManager.load();
+        TextureManager textureManager = new TextureManager(store);
+        textureManager.load();
+
+        Index models = store.getIndex(IndexType.MODELS);
+        ModelProvider modelProvider = modelId -> {
+            Archive archive = models.getArchive(modelId);
+            if (archive == null) {
+                return null;
+            }
+            byte[] data;
+            // Store reads are not thread-safe.
+            synchronized (store) {
+                data = archive.decompress(store.getStorage().loadArchive(archive));
+            }
+            return new ModelLoader().load(modelId, data);
+        };
+
+        Map<Integer, ItemSprite> itemSprites = new LinkedHashMap<>();
+        // Each render allocates large scratch buffers, so memory use grows with the thread count.
+        int threads = Math.min(Runtime.getRuntime().availableProcessors(), 4);
+        ExecutorService pool = Executors.newFixedThreadPool(threads);
+        Map<String, Future<String>> pending = new LinkedHashMap<>();
+        try {
+            for (Item item : items) {
+                List<Integer> quantities = new ArrayList<>();
+                quantities.add(1);
+                int[] thresholds = stackThresholds(itemManager.getItem(item.id));
+                if (thresholds != null) {
+                    itemSprites.put(item.id, new ItemSprite(thresholds));
+                    for (int threshold : thresholds) {
+                        quantities.add(threshold);
+                    }
+                }
+                for (int quantity : quantities) {
+                    String file = quantity == 1 ? item.id + ".png" : item.id + "_" + quantity + ".png";
+                    pending.put(file, pool.submit(() -> {
+                        BufferedImage image = ItemSpriteFactory.createSprite(itemManager, modelProvider,
+                                spriteManager, textureManager, item.id, quantity, 1, 0, false);
+                        if (image == null) {
+                            return null;
+                        }
+                        ImageIO.write(image, "png", outDir.resolve(file).toFile());
+                        return pixelHash(image);
+                    }));
+                }
+            }
+
+            Map<String, String> manifest = new LinkedHashMap<>();
+            for (Map.Entry<String, Future<String>> entry : pending.entrySet()) {
+                String hash = entry.getValue().get();
+                if (hash == null) {
+                    log.warn("No sprite rendered for {}", entry.getKey());
+                    continue;
+                }
+                manifest.put(entry.getKey(), hash);
+            }
+            Gson gson = new Gson();
+            writeEntriesPerLine(outDir.resolve("manifest.json"), gson, manifest);
+            log.info("Rendered {} sprites to {}", manifest.size(), outDir);
+
+            if (itemSpritesOut != null) {
+                writeEntriesPerLine(itemSpritesOut, gson, itemSprites);
+                log.info("Wrote {}", itemSpritesOut);
+            }
+        } catch (InterruptedException | ExecutionException e) {
+            throw new IOException("Failed to render item sprites", e);
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    /** Returns a SHA-256 hash of an image's dimensions and ARGB pixels. */
+    private static String pixelHash(BufferedImage image) {
+        int width = image.getWidth();
+        int height = image.getHeight();
+        int[] pixels = image.getRGB(0, 0, width, height, null, 0, width);
+        ByteBuffer buf = ByteBuffer.allocate(8 + pixels.length * 4);
+        buf.putInt(width).putInt(height);
+        for (int pixel : pixels) {
+            buf.putInt(pixel);
+        }
+
+        byte[] digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256").digest(buf.array());
+        } catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+        StringBuilder hex = new StringBuilder();
+        for (byte b : digest) {
+            hex.append(String.format("%02x", b));
+        }
+        return hex.toString();
+    }
+
+    private static void writeEntriesPerLine(Path out, Gson gson, Map<?, ?> entries) throws IOException {
+        Files.createDirectories(out.toAbsolutePath().getParent());
+        try (BufferedWriter writer = Files.newBufferedWriter(out, StandardCharsets.UTF_8)) {
+            writer.write("{\n");
+            int i = 0;
+            for (Map.Entry<?, ?> entry : entries.entrySet()) {
+                writer.write("  ");
+                writer.write(gson.toJson(entry.getKey().toString()));
+                writer.write(": ");
+                writer.write(gson.toJson(entry.getValue()));
+                writer.write(++i < entries.size() ? ",\n" : "\n");
+            }
+            writer.write("}\n");
+        }
     }
 
     private static Map<Integer, ServiceStats> loadStats(String statsUrl) throws IOException {
@@ -272,6 +441,14 @@ public class ItemDumper {
         SimpleItem(int id, String name) {
             this.id = id;
             this.name = name;
+        }
+    }
+
+    private static final class ItemSprite {
+        final int[] stackThresholds;
+
+        ItemSprite(int[] stackThresholds) {
+            this.stackThresholds = stackThresholds;
         }
     }
 

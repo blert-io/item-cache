@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # OSRS item cache dump. Downloads the latest live cache from the OpenRS2
 # archive, then runs the RuneLite cache-based dumper to (re)generate
-# $OUTPUT_DIR/extended_items.json and $OUTPUT_DIR/simple_items.json.
+# $OUTPUT_DIR/extended_items.json and $OUTPUT_DIR/simple_items.json. If
+# SPRITES_DIR is set, also renders item sprites into it and writes
+# $OUTPUT_DIR/item_sprites.json. If SPRITES_BUCKET is set, renders sprites and
+# uploads them with upload-sprites.sh.
 set -euo pipefail
 
 OUTPUT_DIR="${OUTPUT_DIR:-/resources}"
@@ -15,6 +18,19 @@ if ! { mkdir -p "$OUTPUT_DIR" 2>/dev/null && [ -w "$OUTPUT_DIR" ]; }; then
   log "ERROR: output dir '$OUTPUT_DIR' is not writable by uid $(id -u):$(id -g)." >&2
   log "       (e.g. run with --user \"\$(id -u):\$(id -g)\" so files are owned by you)." >&2
   exit 1
+fi
+
+if [[ -n "${SPRITES_BUCKET:-}" && -z "${SPRITES_DIR:-}" ]]; then
+  SPRITES_DIR="$(mktemp -d)"
+fi
+
+sprite_args=()
+if [[ -n "${SPRITES_DIR:-}" ]]; then
+  if ! { mkdir -p "$SPRITES_DIR" 2>/dev/null && [ -w "$SPRITES_DIR" ]; }; then
+    log "ERROR: sprites dir '$SPRITES_DIR' is not writable by uid $(id -u):$(id -g)." >&2
+    exit 1
+  fi
+  sprite_args=(--out-sprites "$SPRITES_DIR" --out-item-sprites "$OUTPUT_DIR/item_sprites.json")
 fi
 
 # If the cache dir isn't writable, use a throwaway location.
@@ -66,8 +82,18 @@ java -Xmx2g -jar "$JAR" \
   --cachedir "$CACHE_DIR" \
   --out-extended "$OUTPUT_DIR/extended_items.json" \
   --out-simple "$OUTPUT_DIR/simple_items.json" \
-  "${stats_arg[@]}"
+  "${stats_arg[@]}" \
+  "${sprite_args[@]}"
+
+if [[ -n "${SPRITES_BUCKET:-}" ]]; then
+  log "Uploading sprites..."
+  "$(dirname "$0")/upload-sprites.sh" "$SPRITES_DIR"
+fi
 
 log "Done. Updated:"
 log "  $OUTPUT_DIR/extended_items.json"
 log "  $OUTPUT_DIR/simple_items.json"
+if [[ -n "${SPRITES_DIR:-}" ]]; then
+  log "  $OUTPUT_DIR/item_sprites.json"
+  log "  $SPRITES_DIR/"
+fi

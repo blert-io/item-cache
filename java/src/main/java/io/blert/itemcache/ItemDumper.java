@@ -254,7 +254,8 @@ public class ItemDumper {
 
     /**
      * Renders each item's sprite to {@code <id>.png}, and its sprite at each
-     * stack threshold to {@code <id>_<threshold>.png}.
+     * stack threshold to {@code <id>_<threshold>.png}, centering the item
+     * within the sprite.
      * Writes a manifest mapping each file to a SHA-256 hash of its pixels.
      * If {@code itemSpritesOut} is set, outputs metadata about each item's
      * sprites.
@@ -301,11 +302,12 @@ public class ItemDumper {
                 for (int quantity : quantities) {
                     String file = quantity == 1 ? item.id + ".png" : item.id + "_" + quantity + ".png";
                     pending.put(file, pool.submit(() -> {
-                        BufferedImage image = ItemSpriteFactory.createSprite(itemManager, modelProvider,
+                        BufferedImage sprite = ItemSpriteFactory.createSprite(itemManager, modelProvider,
                                 spriteManager, textureManager, item.id, quantity, 1, 0, false);
-                        if (image == null) {
+                        if (sprite == null) {
                             return null;
                         }
+                        BufferedImage image = center(sprite);
                         ImageIO.write(image, "png", outDir.resolve(file).toFile());
                         return pixelHash(image);
                     }));
@@ -334,6 +336,36 @@ public class ItemDumper {
         } finally {
             pool.shutdownNow();
         }
+    }
+
+    /** Returns a copy of an image with its non-transparent pixels centered. */
+    private static BufferedImage center(BufferedImage image) {
+        int width = image.getWidth();
+        int height = image.getHeight();
+        int minX = width;
+        int minY = height;
+        int maxX = -1;
+        int maxY = -1;
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                if ((image.getRGB(x, y) >>> 24) != 0) {
+                    minX = Math.min(minX, x);
+                    minY = Math.min(minY, y);
+                    maxX = Math.max(maxX, x);
+                    maxY = Math.max(maxY, y);
+                }
+            }
+        }
+        if (maxX < 0) {
+            return image;
+        }
+
+        int w = maxX - minX + 1;
+        int h = maxY - minY + 1;
+        int[] pixels = image.getRGB(minX, minY, w, h, null, 0, w);
+        BufferedImage centered = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+        centered.setRGB((width - w) / 2, (height - h) / 2, w, h, pixels, 0, w);
+        return centered;
     }
 
     /** Returns a SHA-256 hash of an image's dimensions and ARGB pixels. */

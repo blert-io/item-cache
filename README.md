@@ -110,7 +110,8 @@ requires `--out-sprites`.
 
 ## Sprites
 
-Sprites are 36x32 PNGs, rendered with the a black outline and no drop shadow.
+Sprites are 36x32 PNGs, rendered with a black outline and no drop shadow, with
+the item centered.
 A run produces the following files:
 
 - `<id>.png`: the item's sprite.
